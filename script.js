@@ -12,10 +12,46 @@ const STORAGE_KEY = 'dispatch-cad-state';
 const CHANNEL_NAME = 'dispatch-cad';
 const SENDER_ID = (crypto && crypto.randomUUID) ? crypto.randomUUID() : (Date.now() + '-' + Math.random());
 let bc = null;
+let timerInterval = null;
+
+// --- Helpers --------------------------------------------------------------
+function formatTimeLeft(ms) {
+  if (ms <= 0) return '0s';
+  const s = Math.ceil(ms / 1000);
+  if (s >= 60) return Math.floor(s/60) + 'm ' + (s%60) + 's';
+  return s + 's';
+}
+
+function preferredTypeForCall(callText) {
+  const t = callText.toLowerCase();
+  if (t.includes('medical') || t.includes('accident')) return 'ems';
+  if (t.includes('fire') || t.includes('structure')) return 'fire';
+  if (t.includes('robbery') || t.includes('suspicious')) return 'police';
+  return 'police';
+}
+
+function baseDurationForType(type) {
+  // base seconds
+  if (type === 'ems') return 120;
+  if (type === 'fire') return 180;
+  return 90; // police/default
+}
+
+function computeAssignmentDuration(callText, unitType) {
+  const pref = preferredTypeForCall(callText);
+  const base = baseDurationForType(unitType);
+  // small random variation +/-20%
+  const variance = 0.2; // 20%
+  const rand = 1 + (Math.random() * 2 - 1) * variance;
+  let dur = base * rand;
+  // faster if unit matches preferred
+  if (unitType === pref) dur *= 0.8;
+  return Math.max(10, Math.round(dur)) * 1000; // ms
+}
 
 // --- Persistence & Sync ---------------------------------------------------
 function saveStateAndBroadcast() {
-  const state = { calls, units, selectedCallId };
+  const state = { calls, units, selectedCallId }; // calls now may include assignment objects
   try {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
   } catch (e) {
@@ -32,8 +68,8 @@ function loadStateFromStorage() {
     const raw = localStorage.getItem(STORAGE_KEY);
     if (raw) {
       const parsed = JSON.parse(raw);
-      calls = parsed.calls || calls;
-      units = parsed.units || units;
+      if (parsed.calls) calls = parsed.calls;
+      if (parsed.units) units = parsed.units;
       selectedCallId = parsed.selectedCallId || null;
     }
   } catch (e) {
@@ -42,7 +78,6 @@ function loadStateFromStorage() {
 }
 
 function initSyncChannels() {
-  // BroadcastChannel if available
   if ('BroadcastChannel' in window) {
     try {
       bc = new BroadcastChannel(CHANNEL_NAME);
@@ -59,7 +94,6 @@ function initSyncChannels() {
     }
   }
 
-  // storage event fallback
   window.addEventListener('storage', (ev) => {
     if (ev.key !== STORAGE_KEY) return;
     if (!ev.newValue) return;
@@ -72,18 +106,49 @@ function initSyncChannels() {
 
 function applyExternalState(state) {
   if (!state) return;
-  // Overwrite local state with incoming state
   calls = state.calls || [];
   units = state.units || [];
   selectedCallId = state.selectedCallId || null;
-  // save locally (but don't broadcast again)
   try { localStorage.setItem(STORAGE_KEY, JSON.stringify({ calls, units, selectedCallId })); } catch (e) {}
   renderUnits();
   renderCalls();
 }
 
+// --- Timers & Tick -------------------------------------------------------
+function startTimerLoop() {
+  if (timerInterval) return;
+  timerInterval = setInterval(() => {
+    let changed = false;
+    const now = Date.now();
+    // iterate calls and their assignedUnits (objects with unitId, endsAt)
+    calls.forEach(c => {
+      if (!Array.isArray(c.assignedUnits)) return;
+      // filter expired assignments
+      c.assignedUnits.slice().forEach(assign => {
+        const unitId = (typeof assign === 'string') ? assign : assign.unitId;
+        const endsAt = (typeof assign === 'string') ? null : assign.endsAt;
+        if (endsAt && now >= endsAt) {
+          // auto-unassign
+          unassignUnitFromCall(unitId, c.id, {save:false});
+          changed = true;
+        }
+      });
+    });
+    if (changed) saveStateAndBroadcast();
+    // update UI countdowns
+    renderCalls();
+    renderUnits();
+  }, 1000);
+}
+
+function stopTimerLoop() {
+  if (timerInterval) {
+    clearInterval(timerInterval);
+    timerInterval = null;
+  }
+}
+
 // --- Actions --------------------------------------------------------------
-// Generate call
 function generateCall() {
   const callTypes = [
     "Robbery in progress",
@@ -102,7 +167,6 @@ function generateCall() {
   saveStateAndBroadcast();
 }
 
-// Clear all calls
 function clearCalls() {
   calls = [];
   units.forEach(u => u.status = 'available');
@@ -112,7 +176,6 @@ function clearCalls() {
   saveStateAndBroadcast();
 }
 
-// Render calls
 function renderCalls() {
   const callList = document.getElementById("callList");
   if (!callList) return;
@@ -129,16 +192,29 @@ function renderCalls() {
     title.className = 'call-title';
     title.innerText = c.call;
 
+    const preferred = preferredTypeForCall(c.call);
+    const prefNote = document.createElement('div');
+    prefNote.className = 'call-pref';
+    prefNote.innerText = 'Preferred: ' + (preferred ? preferred.toUpperCase() : 'ANY');
+    prefNote.dataset.type = preferred;
+
     // assigned units container
     const assigned = document.createElement('div');
     assigned.className = 'assigned-list';
 
-    c.assignedUnits.forEach(unitId => {
+    (c.assignedUnits || []).forEach(assign => {
+      const unitId = (typeof assign === 'string') ? assign : assign.unitId;
       const unit = units.find(u => u.id === unitId);
       if (!unit) return;
       const badge = document.createElement('span');
       badge.className = 'assigned-unit ' + (unit.type || '');
-      badge.innerText = unit.name;
+      // compute remaining
+      let remainingText = '';
+      if (assign && typeof assign === 'object' && assign.endsAt) {
+        const left = assign.endsAt - Date.now();
+        remainingText = ' — ' + formatTimeLeft(left);
+      }
+      badge.innerText = unit.name + remainingText;
 
       // click to unassign
       badge.onclick = (e) => {
@@ -174,7 +250,18 @@ function renderCalls() {
         return;
       }
 
-      assignUnitToCall(unitId, c.id);
+      // compute duration based on call and unit type
+      const duration = computeAssignmentDuration(c.call, unit.type);
+      const endsAt = Date.now() + duration;
+      // push assignment object
+      c.assignedUnits = c.assignedUnits || [];
+      c.assignedUnits.push({ unitId, assignedAt: Date.now(), duration, endsAt });
+
+      // mark busy
+      unit.status = 'busy';
+
+      renderUnits();
+      renderCalls();
       saveStateAndBroadcast();
     });
 
@@ -187,6 +274,7 @@ function renderCalls() {
     };
 
     card.appendChild(title);
+    card.appendChild(prefNote);
     card.appendChild(assigned);
 
     callList.appendChild(card);
@@ -206,7 +294,6 @@ function updateActiveCallDisplay() {
   }
 }
 
-// Render units (DRAGGABLE)
 function renderUnits() {
   const unitList = document.getElementById("unitList");
   if (!unitList) return;
@@ -248,28 +335,35 @@ function assignUnitToCall(unitId, callId) {
   const unit = units.find(u => u.id === unitId);
   if (!call || !unit) return;
 
-  // avoid duplicate
-  if (!call.assignedUnits.includes(unitId)) call.assignedUnits.push(unitId);
+  // compute duration
+  const duration = computeAssignmentDuration(call.call, unit.type);
+  const endsAt = Date.now() + duration;
+
+  call.assignedUnits = call.assignedUnits || [];
+  if (!call.assignedUnits.find(a => (typeof a === 'string' ? a : a.unitId) === unitId)) {
+    call.assignedUnits.push({ unitId, assignedAt: Date.now(), duration, endsAt });
+  }
   unit.status = 'busy';
 
-  // reflect immediately
   renderUnits();
   renderCalls();
+  saveStateAndBroadcast();
 }
 
-function unassignUnitFromCall(unitId, callId) {
+function unassignUnitFromCall(unitId, callId, opts = {save:true}) {
   const call = calls.find(c => c.id === callId);
   const unit = units.find(u => u.id === unitId);
   if (!call || !unit) return;
 
-  call.assignedUnits = call.assignedUnits.filter(id => id !== unitId);
+  call.assignedUnits = (call.assignedUnits || []).filter(a => (typeof a === 'string' ? a : a.unitId) !== unitId);
   unit.status = 'available';
 
   renderUnits();
   renderCalls();
+  if (opts.save) saveStateAndBroadcast();
 }
 
-// initialize controls
+// init controls
 function initControls() {
   const gen = document.getElementById('generateBtn');
   const clear = document.getElementById('clearBtn');
@@ -282,5 +376,6 @@ function initControls() {
 loadStateFromStorage();
 initSyncChannels();
 initControls();
+startTimerLoop();
 renderUnits();
 renderCalls();
