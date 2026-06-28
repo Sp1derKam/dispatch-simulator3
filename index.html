@@ -1,1 +1,27 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Dispatch Simulator</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
 
+  <h1>Dispatch Simulator</h1>
+
+  <div id="callBox">
+    <h2>Active Call</h2>
+    <p id="callText">No active call</p>
+  </div>
+
+  <button onclick="generateCall()">Generate Call</button>
+
+  <div id="units">
+    <h2>Units</h2>
+    <button onclick="dispatch('Police')">Police</button>
+    <button onclick="dispatch('Fire')">Fire</button>
+    <button onclick="dispatch('EMS')">EMS</button>
+  </div>
+
+  <script src="script.js"></script>
+</body>
+</html>
