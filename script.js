@@ -115,16 +115,31 @@ function applyExternalState(state) {
 }
 
 // --- Timers & Tick -------------------------------------------------------
+function tickCountdowns() {
+  const now = Date.now();
+  document.querySelectorAll('.countdown').forEach(el => {
+    const ends = Number(el.dataset.ends);
+    if (!ends) {
+      el.textContent = '';
+      return;
+    }
+    const left = ends - now;
+    if (left <= 0) {
+      el.textContent = ' — 0s';
+    } else {
+      el.textContent = ' — ' + formatTimeLeft(left);
+    }
+  });
+}
+
 function startTimerLoop() {
   if (timerInterval) return;
   timerInterval = setInterval(() => {
     let changed = false;
     const now = Date.now();
-    // iterate calls and their assignedUnits (objects with unitId, endsAt)
+
     calls.forEach(c => {
-      if (!Array.isArray(c.assignedUnits)) return;
-      // filter expired assignments
-      c.assignedUnits.slice().forEach(assign => {
+      (c.assignedUnits || []).slice().forEach(assign => {
         const unitId = (typeof assign === 'string') ? assign : assign.unitId;
         const endsAt = (typeof assign === 'string') ? null : assign.endsAt;
         if (endsAt && now >= endsAt) {
@@ -134,10 +149,11 @@ function startTimerLoop() {
         }
       });
     });
+
     if (changed) saveStateAndBroadcast();
-    // update UI countdowns
-    renderCalls();
-    renderUnits();
+
+    // update only countdown text nodes in-place (faster)
+    tickCountdowns();
   }, 1000);
 }
 
@@ -206,15 +222,26 @@ function renderCalls() {
       const unitId = (typeof assign === 'string') ? assign : assign.unitId;
       const unit = units.find(u => u.id === unitId);
       if (!unit) return;
+
       const badge = document.createElement('span');
       badge.className = 'assigned-unit ' + (unit.type || '');
-      // compute remaining
-      let remainingText = '';
+
+      const nameSpan = document.createElement('span');
+      nameSpan.className = 'assigned-name';
+      nameSpan.innerText = unit.name;
+      badge.appendChild(nameSpan);
+
+      // countdown span (empty if no endsAt)
+      const countdown = document.createElement('span');
+      countdown.className = 'countdown';
       if (assign && typeof assign === 'object' && assign.endsAt) {
+        countdown.dataset.ends = assign.endsAt; // set ends timestamp
         const left = assign.endsAt - Date.now();
-        remainingText = ' — ' + formatTimeLeft(left);
+        countdown.textContent = ' — ' + formatTimeLeft(left);
+      } else {
+        countdown.textContent = '';
       }
-      badge.innerText = unit.name + remainingText;
+      badge.appendChild(countdown);
 
       // click to unassign
       badge.onclick = (e) => {
