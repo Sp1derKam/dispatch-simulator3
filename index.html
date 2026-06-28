@@ -1,27 +1,39 @@
 <!DOCTYPE html>
 <html>
 <head>
-  <title>Dispatch Simulator</title>
+  <title>Dispatch CAD Simulator</title>
   <link rel="stylesheet" href="style.css">
 </head>
+
 <body>
 
-  <h1>Dispatch Simulator</h1>
+<h1>CAD Dispatch System</h1>
 
-  <div id="callBox">
-    <h2>Active Call</h2>
-    <p id="callText">No active call</p>
+<div class="container">
+
+  <!-- CALLS -->
+  <div class="panel" id="callsPanel">
+    <h2>Active Calls</h2>
+    <button onclick="generateCall()">Generate Call</button>
+    <div id="callList"></div>
   </div>
 
-  <button onclick="generateCall()">Generate Call</button>
+  <!-- DISPATCH BOARD -->
+  <div class="panel" id="dispatchBoard">
+    <h2>Dispatch Board</h2>
+    <div id="activeCall">No active selection</div>
+    <div id="dropZone">Drop Unit Here</div>
+  </div>
 
-  <div id="units">
+  <!-- UNITS -->
+  <div class="panel" id="unitsPanel">
     <h2>Units</h2>
-    <button onclick="dispatch('Police')">Police</button>
-    <button onclick="dispatch('Fire')">Fire</button>
-    <button onclick="dispatch('EMS')">EMS</button>
+    <div id="unitList"></div>
   </div>
 
-  <script src="script.js"></script>
+</div>
+
+<script src="script.js"></script>
+
 </body>
 </html>
