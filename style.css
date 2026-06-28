@@ -1,12 +1,45 @@
 body {
   font-family: Arial;
-  text-align: center;
-  background: #111;
+  background: #0f0f0f;
   color: white;
+  text-align: center;
+}
+
+.container {
+  display: flex;
+  justify-content: space-around;
+  margin-top: 20px;
+}
+
+.panel {
+  width: 30%;
+  background: #1c1c1c;
+  padding: 10px;
+  border-radius: 10px;
 }
 
 button {
+  padding: 8px;
+  margin: 5px;
+  cursor: pointer;
+}
+
+.call {
+  background: #333;
   margin: 5px;
   padding: 10px;
   cursor: pointer;
+}
+
+.unit {
+  background: #444;
+  margin: 5px;
+  padding: 10px;
+  cursor: grab;
+}
+
+#dropZone {
+  margin-top: 20px;
+  padding: 40px;
+  border: 2px dashed white;
 }
