@@ -1,28 +1,94 @@
-let currentCall = null;
+let calls = [];
+let units = ["Unit 12", "Unit 45", "Unit 7", "Unit 3"];
 
-const calls = [
-  "Robbery in progress at downtown store",
-  "House fire reported on Oak Street",
-  "Medical emergency: unconscious person",
-  "Car accident on Highway 6",
-  "Suspicious person reported in neighborhood"
-];
+let selectedCall = null;
 
+// Generate call
 function generateCall() {
-  const randomIndex = Math.floor(Math.random() * calls.length);
-  currentCall = calls[randomIndex];
+  const callTypes = [
+    "Robbery in progress",
+    "Medical emergency",
+    "Structure fire",
+    "Traffic accident",
+    "Suspicious activity"
+  ];
 
-  document.getElementById("callText").innerText = currentCall;
+  const call = callTypes[Math.floor(Math.random() * callTypes.length)];
+  const id = Date.now();
+
+  calls.push({ id, call });
+
+  renderCalls();
 }
 
-function dispatch(unit) {
-  if (!currentCall) {
-    alert("No active call!");
+// Render calls
+function renderCalls() {
+  const callList = document.getElementById("callList");
+  callList.innerHTML = "";
+
+  calls.forEach(c => {
+    const div = document.createElement("div");
+    div.className = "call";
+    div.innerText = c.call;
+
+    div.onclick = () => selectCall(c);
+
+    callList.appendChild(div);
+  });
+}
+
+// Select call
+function selectCall(call) {
+  selectedCall = call;
+  document.getElementById("activeCall").innerText = "Selected: " + call.call;
+}
+
+// Render units (DRAGGABLE)
+function renderUnits() {
+  const unitList = document.getElementById("unitList");
+  unitList.innerHTML = "";
+
+  units.forEach(u => {
+    const div = document.createElement("div");
+    div.className = "unit";
+    div.innerText = u;
+
+    div.draggable = true;
+
+    div.addEventListener("dragstart", (e) => {
+      e.dataTransfer.setData("text", u);
+    });
+
+    unitList.appendChild(div);
+  });
+}
+
+// Drop zone logic
+const dropZone = document.getElementById("dropZone");
+
+dropZone.addEventListener("dragover", (e) => {
+  e.preventDefault();
+});
+
+dropZone.addEventListener("drop", (e) => {
+  e.preventDefault();
+
+  const unit = e.dataTransfer.getData("text");
+
+  if (!selectedCall) {
+    alert("Select a call first!");
     return;
   }
 
-  alert(`${unit} dispatched to: ${currentCall}`);
+  dropZone.innerText = `${unit} dispatched to: ${selectedCall.call}`;
 
-  currentCall = null;
-  document.getElementById("callText").innerText = "No active call";
-}
+  // remove call after dispatch
+  calls = calls.filter(c => c.id !== selectedCall.id);
+  selectedCall = null;
+
+  renderCalls();
+});
+
+// init
+renderUnits();
+renderCalls();
