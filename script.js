@@ -4,6 +4,7 @@ let units = [];
 let unitMap = new Map(); // index for O(1) lookups
 let callMap = new Map();
 let selectedCallId = null;
+let selectedUnitId = null; // Track selected unit for touch assignment
 let activeCountdowns = new Set(); // track which countdowns need updating
 
 const STORAGE_KEY = 'dispatch-cad-state';
@@ -95,11 +96,16 @@ function loadStateFromStorage() {
       if (parsed.units) units = parsed.units;
       selectedCallId = parsed.selectedCallId || null;
     } else {
+      // First load: initialize with presets
       units = JSON.parse(JSON.stringify(UNIT_PRESETS));
+      calls = [];
+      selectedCallId = null;
     }
   } catch (e) {
     console.warn('localStorage read failed', e);
     units = JSON.parse(JSON.stringify(UNIT_PRESETS));
+    calls = [];
+    selectedCallId = null;
   }
   rebuildIndices();
 }
@@ -269,7 +275,7 @@ function renderCalls() {
       }
       badge.appendChild(countdown);
 
-      // click to unassign (event delegation would be better, but this is minimal)
+      // click to unassign
       badge.onclick = (e) => {
         e.stopPropagation();
         unassignUnitFromCall(unitId, c.id);
@@ -279,7 +285,23 @@ function renderCalls() {
       assigned.appendChild(badge);
     });
 
-    // drag handlers on card
+    // Assign button for touch-friendly assignment
+    const assignBtn = document.createElement('button');
+    assignBtn.className = 'assign-btn';
+    assignBtn.innerText = selectedUnitId ? '✓ Assign Selected Unit' : 'Select a unit to assign';
+    assignBtn.style.marginTop = '8px';
+    assignBtn.disabled = !selectedUnitId;
+    assignBtn.onclick = (e) => {
+      e.stopPropagation();
+      if (selectedUnitId) {
+        assignUnitToCall(selectedUnitId, c.id);
+        selectedUnitId = null;
+        render();
+      }
+    };
+    assigned.appendChild(assignBtn);
+
+    // drag handlers on card (for desktop fallback)
     card.addEventListener('dragover', (e) => {
       e.preventDefault();
       card.classList.add('drag-over');
@@ -303,13 +325,10 @@ function renderCalls() {
         return;
       }
 
-      // compute duration based on call and unit type
       const duration = computeAssignmentDuration(c.call, unit.type);
       const endsAt = Date.now() + duration;
       c.assignedUnits = c.assignedUnits || [];
       c.assignedUnits.push({ unitId, assignedAt: Date.now(), duration, endsAt });
-
-      // mark busy
       unit.status = 'busy';
 
       render();
@@ -379,6 +398,22 @@ function updateCallCards() {
 
       assigned.appendChild(badge);
     });
+
+    // Re-add assign button
+    const assignBtn = document.createElement('button');
+    assignBtn.className = 'assign-btn';
+    assignBtn.innerText = selectedUnitId ? '✓ Assign Selected Unit' : 'Select a unit to assign';
+    assignBtn.style.marginTop = '8px';
+    assignBtn.disabled = !selectedUnitId;
+    assignBtn.onclick = (e) => {
+      e.stopPropagation();
+      if (selectedUnitId) {
+        assignUnitToCall(selectedUnitId, c.id);
+        selectedUnitId = null;
+        render();
+      }
+    };
+    assigned.appendChild(assignBtn);
   });
 }
 
@@ -401,6 +436,7 @@ function renderUnits() {
   units.forEach(u => {
     const div = document.createElement("div");
     div.className = "unit" + (u.status === 'busy' ? ' busy' : '');
+    if (u.id === selectedUnitId) div.classList.add('unit-selected');
     div.dataset.id = u.id;
 
     const nameSpan = document.createElement('span');
@@ -414,8 +450,16 @@ function renderUnits() {
     div.appendChild(nameSpan);
     div.appendChild(typeSpan);
 
-    // only draggable when available
+    // Touch-friendly: tap to select, then assign from call card
     if (u.status === 'available') {
+      div.style.cursor = 'pointer';
+      div.onclick = (e) => {
+        e.stopPropagation();
+        selectedUnitId = (selectedUnitId === u.id) ? null : u.id;
+        render();
+      };
+
+      // Also keep drag support for desktop
       div.draggable = true;
       div.addEventListener("dragstart", (e) => {
         e.dataTransfer.setData("text/plain", u.id);
@@ -454,6 +498,7 @@ function clearCalls() {
   calls = [];
   units.forEach(u => u.status = 'available');
   selectedCallId = null;
+  selectedUnitId = null;
   rebuildIndices();
   render();
   debouncedSaveAndBroadcast();
