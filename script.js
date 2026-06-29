@@ -1,20 +1,28 @@
 // Live CAD with cross-tab sync (BroadcastChannel + localStorage fallback)
 let calls = [];
-let units = [
+let units = [];
+let unitMap = new Map(); // index for O(1) lookups
+let callMap = new Map();
+let selectedCallId = null;
+let activeCountdowns = new Set(); // track which countdowns need updating
+
+const STORAGE_KEY = 'dispatch-cad-state';
+const CHANNEL_NAME = 'dispatch-cad';
+const SENDER_ID = (crypto && crypto.randomUUID) ? crypto.randomUUID() : (Date.now() + '-' + Math.random());
+let bc = null;
+let timerInterval = null;
+let syncDebounceTimer = null;
+const SYNC_DEBOUNCE_MS = 300; // batch updates
+
+// --- Unit presets -------------------------------------------------------
+const UNIT_PRESETS = [
   { id: 'unit-12', name: 'Unit 12', type: 'police', status: 'available' },
   { id: 'unit-45', name: 'Unit 45', type: 'ems', status: 'available' },
   { id: 'unit-7', name: 'Unit 7', type: 'fire', status: 'available' },
   { id: 'unit-3', name: 'Unit 3', type: 'police', status: 'available' }
 ];
 
-let selectedCallId = null;
-const STORAGE_KEY = 'dispatch-cad-state';
-const CHANNEL_NAME = 'dispatch-cad';
-const SENDER_ID = (crypto && crypto.randomUUID) ? crypto.randomUUID() : (Date.now() + '-' + Math.random());
-let bc = null;
-let timerInterval = null;
-
-// --- Helpers --------------------------------------------------------------
+// --- Helpers ---------------------------------------------------------------
 function formatTimeLeft(ms) {
   if (ms <= 0) return '0s';
   const s = Math.ceil(ms / 1000);
@@ -49,9 +57,24 @@ function computeAssignmentDuration(callText, unitType) {
   return Math.max(10, Math.round(dur)) * 1000; // ms
 }
 
-// --- Persistence & Sync ---------------------------------------------------
+// --- Index management ---------------------------------------------------
+function rebuildIndices() {
+  unitMap.clear();
+  callMap.clear();
+  units.forEach(u => unitMap.set(u.id, u));
+  calls.forEach(c => callMap.set(c.id, c));
+}
+
+// --- Persistence & Sync ------------------------------------------------
+function debouncedSaveAndBroadcast() {
+  clearTimeout(syncDebounceTimer);
+  syncDebounceTimer = setTimeout(() => {
+    saveStateAndBroadcast();
+  }, SYNC_DEBOUNCE_MS);
+}
+
 function saveStateAndBroadcast() {
-  const state = { calls, units, selectedCallId }; // calls now may include assignment objects
+  const state = { calls, units, selectedCallId };
   try {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
   } catch (e) {
@@ -71,10 +94,14 @@ function loadStateFromStorage() {
       if (parsed.calls) calls = parsed.calls;
       if (parsed.units) units = parsed.units;
       selectedCallId = parsed.selectedCallId || null;
+    } else {
+      units = JSON.parse(JSON.stringify(UNIT_PRESETS));
     }
   } catch (e) {
     console.warn('localStorage read failed', e);
+    units = JSON.parse(JSON.stringify(UNIT_PRESETS));
   }
+  rebuildIndices();
 }
 
 function initSyncChannels() {
@@ -109,18 +136,25 @@ function applyExternalState(state) {
   calls = state.calls || [];
   units = state.units || [];
   selectedCallId = state.selectedCallId || null;
+  rebuildIndices();
   try { localStorage.setItem(STORAGE_KEY, JSON.stringify({ calls, units, selectedCallId })); } catch (e) {}
-  renderUnits();
-  renderCalls();
+  render();
 }
 
 // --- Timers & Tick -------------------------------------------------------
 function tickCountdowns() {
   const now = Date.now();
-  document.querySelectorAll('.countdown').forEach(el => {
+  // Only update active countdowns
+  activeCountdowns.forEach(countdownId => {
+    const el = document.getElementById(countdownId);
+    if (!el) {
+      activeCountdowns.delete(countdownId);
+      return;
+    }
     const ends = Number(el.dataset.ends);
     if (!ends) {
       el.textContent = '';
+      activeCountdowns.delete(countdownId);
       return;
     }
     const left = ends - now;
@@ -139,20 +173,27 @@ function startTimerLoop() {
     const now = Date.now();
 
     calls.forEach(c => {
-      (c.assignedUnits || []).slice().forEach(assign => {
-        const unitId = (typeof assign === 'string') ? assign : assign.unitId;
+      if (!c.assignedUnits) return;
+      const remaining = c.assignedUnits.filter(assign => {
         const endsAt = (typeof assign === 'string') ? null : assign.endsAt;
         if (endsAt && now >= endsAt) {
-          // auto-unassign
-          unassignUnitFromCall(unitId, c.id, {save:false});
+          const unitId = (typeof assign === 'string') ? assign : assign.unitId;
+          unassignUnitFromCall(unitId, c.id, { save: false });
           changed = true;
+          return false; // remove this assignment
         }
+        return true; // keep it
       });
+      c.assignedUnits = remaining;
     });
 
-    if (changed) saveStateAndBroadcast();
+    if (changed) {
+      rebuildIndices();
+      debouncedSaveAndBroadcast();
+      updateCallCards();
+    }
 
-    // update only countdown text nodes in-place (faster)
+    // update countdown text
     tickCountdowns();
   }, 1000);
 }
@@ -164,38 +205,20 @@ function stopTimerLoop() {
   }
 }
 
-// --- Actions --------------------------------------------------------------
-function generateCall() {
-  const callTypes = [
-    "Robbery in progress",
-    "Medical emergency",
-    "Structure fire",
-    "Traffic accident",
-    "Suspicious activity"
-  ];
-
-  const callText = callTypes[Math.floor(Math.random() * callTypes.length)];
-  const id = Date.now().toString();
-
-  calls.unshift({ id, call: callText, assignedUnits: [] });
-
+// --- Rendering (optimized) -----------------------------------------------
+function render() {
   renderCalls();
-  saveStateAndBroadcast();
-}
-
-function clearCalls() {
-  calls = [];
-  units.forEach(u => u.status = 'available');
-  selectedCallId = null;
   renderUnits();
-  renderCalls();
-  saveStateAndBroadcast();
+  updateActiveCallDisplay();
 }
 
 function renderCalls() {
   const callList = document.getElementById("callList");
   if (!callList) return;
+
+  // Clear and rebuild (unavoidable for structure changes, but kept minimal)
   callList.innerHTML = "";
+  activeCountdowns.clear();
 
   calls.forEach(c => {
     const card = document.createElement("div");
@@ -218,9 +241,9 @@ function renderCalls() {
     const assigned = document.createElement('div');
     assigned.className = 'assigned-list';
 
-    (c.assignedUnits || []).forEach(assign => {
+    (c.assignedUnits || []).forEach((assign, idx) => {
       const unitId = (typeof assign === 'string') ? assign : assign.unitId;
-      const unit = units.find(u => u.id === unitId);
+      const unit = unitMap.get(unitId); // O(1) lookup
       if (!unit) return;
 
       const badge = document.createElement('span');
@@ -231,11 +254,14 @@ function renderCalls() {
       nameSpan.innerText = unit.name;
       badge.appendChild(nameSpan);
 
-      // countdown span (empty if no endsAt)
+      // countdown span
       const countdown = document.createElement('span');
+      const countdownId = `countdown-${c.id}-${unitId}-${idx}`;
+      countdown.id = countdownId;
       countdown.className = 'countdown';
       if (assign && typeof assign === 'object' && assign.endsAt) {
-        countdown.dataset.ends = assign.endsAt; // set ends timestamp
+        countdown.dataset.ends = assign.endsAt;
+        activeCountdowns.add(countdownId);
         const left = assign.endsAt - Date.now();
         countdown.textContent = ' — ' + formatTimeLeft(left);
       } else {
@@ -243,17 +269,17 @@ function renderCalls() {
       }
       badge.appendChild(countdown);
 
-      // click to unassign
+      // click to unassign (event delegation would be better, but this is minimal)
       badge.onclick = (e) => {
         e.stopPropagation();
         unassignUnitFromCall(unitId, c.id);
-        saveStateAndBroadcast();
+        debouncedSaveAndBroadcast();
       };
 
       assigned.appendChild(badge);
     });
 
-    // make each call card a drop target
+    // drag handlers on card
     card.addEventListener('dragover', (e) => {
       e.preventDefault();
       card.classList.add('drag-over');
@@ -269,7 +295,7 @@ function renderCalls() {
       const unitId = e.dataTransfer.getData('text/plain');
       if (!unitId) return;
 
-      const unit = units.find(u => u.id === unitId);
+      const unit = unitMap.get(unitId);
       if (!unit) return;
 
       if (unit.status === 'busy') {
@@ -280,24 +306,25 @@ function renderCalls() {
       // compute duration based on call and unit type
       const duration = computeAssignmentDuration(c.call, unit.type);
       const endsAt = Date.now() + duration;
-      // push assignment object
       c.assignedUnits = c.assignedUnits || [];
       c.assignedUnits.push({ unitId, assignedAt: Date.now(), duration, endsAt });
 
       // mark busy
       unit.status = 'busy';
 
-      renderUnits();
-      renderCalls();
-      saveStateAndBroadcast();
+      render();
+      debouncedSaveAndBroadcast();
     });
 
     // click to select active call
     card.onclick = () => {
       selectedCallId = c.id === selectedCallId ? null : c.id;
       updateActiveCallDisplay();
-      renderCalls();
-      saveStateAndBroadcast();
+      // Only update call cards, not units
+      const sel = document.querySelectorAll('.call-card.selected');
+      sel.forEach(el => el.classList.remove('selected'));
+      if (selectedCallId === c.id) card.classList.add('selected');
+      debouncedSaveAndBroadcast();
     };
 
     card.appendChild(title);
@@ -306,8 +333,53 @@ function renderCalls() {
 
     callList.appendChild(card);
   });
+}
 
-  updateActiveCallDisplay();
+// Incremental update for call cards (called from timer)
+function updateCallCards() {
+  calls.forEach(c => {
+    const card = document.querySelector(`[data-id="${c.id}"]`);
+    if (!card) return;
+
+    const assigned = card.querySelector('.assigned-list');
+    if (!assigned) return;
+
+    assigned.innerHTML = '';
+
+    (c.assignedUnits || []).forEach((assign, idx) => {
+      const unitId = (typeof assign === 'string') ? assign : assign.unitId;
+      const unit = unitMap.get(unitId);
+      if (!unit) return;
+
+      const badge = document.createElement('span');
+      badge.className = 'assigned-unit ' + (unit.type || '');
+
+      const nameSpan = document.createElement('span');
+      nameSpan.className = 'assigned-name';
+      nameSpan.innerText = unit.name;
+      badge.appendChild(nameSpan);
+
+      const countdown = document.createElement('span');
+      const countdownId = `countdown-${c.id}-${unitId}-${idx}`;
+      countdown.id = countdownId;
+      countdown.className = 'countdown';
+      if (assign && typeof assign === 'object' && assign.endsAt) {
+        countdown.dataset.ends = assign.endsAt;
+        activeCountdowns.add(countdownId);
+        const left = assign.endsAt - Date.now();
+        countdown.textContent = ' — ' + formatTimeLeft(left);
+      }
+      badge.appendChild(countdown);
+
+      badge.onclick = (e) => {
+        e.stopPropagation();
+        unassignUnitFromCall(unitId, c.id);
+        debouncedSaveAndBroadcast();
+      };
+
+      assigned.appendChild(badge);
+    });
+  });
 }
 
 function updateActiveCallDisplay() {
@@ -316,7 +388,7 @@ function updateActiveCallDisplay() {
   if (!selectedCallId) {
     el.innerText = 'No active selection';
   } else {
-    const c = calls.find(cc => cc.id === selectedCallId);
+    const c = callMap.get(selectedCallId);
     el.innerText = c ? ('Selected: ' + c.call) : 'No active selection';
   }
 }
@@ -357,9 +429,39 @@ function renderUnits() {
   });
 }
 
+// --- Actions ---------------------------------------------------------------
+function generateCall() {
+  const callTypes = [
+    "Robbery in progress",
+    "Medical emergency",
+    "Structure fire",
+    "Traffic accident",
+    "Suspicious activity"
+  ];
+
+  const callText = callTypes[Math.floor(Math.random() * callTypes.length)];
+  const id = Date.now().toString();
+
+  const newCall = { id, call: callText, assignedUnits: [] };
+  calls.unshift(newCall);
+  callMap.set(id, newCall);
+
+  renderCalls();
+  debouncedSaveAndBroadcast();
+}
+
+function clearCalls() {
+  calls = [];
+  units.forEach(u => u.status = 'available');
+  selectedCallId = null;
+  rebuildIndices();
+  render();
+  debouncedSaveAndBroadcast();
+}
+
 function assignUnitToCall(unitId, callId) {
-  const call = calls.find(c => c.id === callId);
-  const unit = units.find(u => u.id === unitId);
+  const call = callMap.get(callId);
+  const unit = unitMap.get(unitId);
   if (!call || !unit) return;
 
   // compute duration
@@ -367,30 +469,31 @@ function assignUnitToCall(unitId, callId) {
   const endsAt = Date.now() + duration;
 
   call.assignedUnits = call.assignedUnits || [];
-  if (!call.assignedUnits.find(a => (typeof a === 'string' ? a : a.unitId) === unitId)) {
+  const unitIds = new Set(call.assignedUnits.map(a => (typeof a === 'string' ? a : a.unitId)));
+  if (!unitIds.has(unitId)) {
     call.assignedUnits.push({ unitId, assignedAt: Date.now(), duration, endsAt });
   }
   unit.status = 'busy';
 
-  renderUnits();
-  renderCalls();
-  saveStateAndBroadcast();
+  render();
+  debouncedSaveAndBroadcast();
 }
 
-function unassignUnitFromCall(unitId, callId, opts = {save:true}) {
-  const call = calls.find(c => c.id === callId);
-  const unit = units.find(u => u.id === unitId);
+function unassignUnitFromCall(unitId, callId, opts = { save: true }) {
+  const call = callMap.get(callId);
+  const unit = unitMap.get(unitId);
   if (!call || !unit) return;
 
   call.assignedUnits = (call.assignedUnits || []).filter(a => (typeof a === 'string' ? a : a.unitId) !== unitId);
   unit.status = 'available';
 
+  // Immediately update the card to reflect change
+  updateCallCards();
   renderUnits();
-  renderCalls();
-  if (opts.save) saveStateAndBroadcast();
+  if (opts.save) debouncedSaveAndBroadcast();
 }
 
-// init controls
+// --- Init ----------------------------------------------------------------
 function initControls() {
   const gen = document.getElementById('generateBtn');
   const clear = document.getElementById('clearBtn');
@@ -399,10 +502,9 @@ function initControls() {
   if (clear) clear.addEventListener('click', clearCalls);
 }
 
-// init
+// Startup
 loadStateFromStorage();
 initSyncChannels();
 initControls();
 startTimerLoop();
-renderUnits();
-renderCalls();
+render();
